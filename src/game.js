@@ -5,7 +5,11 @@ import {
   randomOrientation,
   freshOrientation,
   topFace,
-  intervene,
+  DIRECTION_VECTORS,
+  hammerImpact,
+  validTablePoint,
+  throwPosition,
+  resolveForces,
 } from "./dice.js";
 
 export const CHARACTERS = characters.map((c) => ({
@@ -98,6 +102,14 @@ export class Game {
   get def() {
     return definition(this.c);
   }
+  announceSkill(character = this.c, label) {
+    this.state.lastSkill = {
+      id: character.id,
+      label,
+      player: this.p.id,
+      serial: (this.state.lastSkill?.serial || 0) + 1,
+    };
+  }
   note(text) {
     this.state.log.unshift(text);
     this.state.log = this.state.log.slice(0, 40);
@@ -127,9 +139,12 @@ export class Game {
     }
     this.note(`${p.name} · 第 ${p.baton + 1} 棒 ${this.def.character}`);
   }
-  roll() {
+  roll(gesture) {
     if (this.state.phase !== "ready") return false;
     this.state.phase = "rolling";
+    this.state.dicePosition = throwPosition(gesture);
+    this.state.pendingActions = [];
+    this.state.resolution = null;
     this.state.dice = randomOrientation(this.rng);
     this.state.interventions = this.state.players.map(() => ({
       wind: false,
@@ -145,7 +160,7 @@ export class Game {
   windowSeconds() {
     return (this.c.status.slowmo ? 7 : 5) + (this.p.status.rush ? -1.5 : 0);
   }
-  interfere(seat, kind, dir, power) {
+  interfere(seat, kind, dir, power, point = null) {
     const s = this.state,
       budget = s.interventions[seat];
     if (
@@ -153,42 +168,67 @@ export class Game {
       !budget ||
       !["wind", "hammer"].includes(kind) ||
       budget[kind] ||
-      !["left", "right", "up", "down"].includes(dir) ||
-      !Number.isFinite(power)
+      !Number.isFinite(power) ||
+      power < 0 ||
+      power > 1 ||
+      !DIRECTION_VECTORS[dir]
     )
       return null;
-    budget[kind] = true;
     const player = s.players[seat],
       boost =
         effect(player) === (kind === "wind" ? "wind_bonus" : "hammer_bonus")
           ? 1.25
           : 1;
+    const effectivePower = clamp(power * boost, 0, 1);
     if (kind === "wind" && player.status.rotate) {
       const dirs = ["up", "right", "down", "left"];
       dir = dirs[(dirs.indexOf(dir) + 1) % 4];
     }
-    const before = topFace(s.dice),
-      r = intervene(s.dice, dir, clamp(power * boost, 0, 1), kind, this.rng);
-    s.dice = r.orientation;
-    s.lastIntervention = {
-      ...r,
+    if (kind === "hammer" && !validTablePoint(point)) return null;
+    const impact =
+      kind === "hammer"
+        ? hammerImpact(point, s.dicePosition, effectivePower)
+        : {
+            effectivePower,
+            vector: DIRECTION_VECTORS[dir].map((n) => n * effectivePower),
+            lift: 0,
+            dir,
+          };
+    const action = {
+      ...impact,
       seat,
-      before,
+      kind,
+      power,
       serial: (s.lastIntervention?.serial || 0) + 1,
     };
+    budget[kind] = true;
+    s.pendingActions.push(action);
+    s.lastIntervention = action;
     this.note(
-      `${player.name}${kind === "wind" ? "吹风" : "振桌"}：${before} → ${r.face} 点${r.steps ? "" : "（稳住了）"}`,
+      player.name +
+        (kind === "wind" ? "吹风" : "振桌") +
+        "已蓄势，等待合力结算",
     );
-    return r;
+    return action;
+  }
+  prepareResolution() {
+    const s = this.state;
+    if (s.phase !== "intervene") return false;
+    s.phase = "showdown";
+    s.resolution = resolveForces(s.dice, s.pendingActions, this.rng);
+    return s.resolution;
   }
   settle() {
     const s = this.state,
       c = this.c,
       e = effect(this.p);
-    if (s.phase !== "intervene") return false;
+    if (!["intervene", "showdown", "settling"].includes(s.phase)) return false;
+    if (!s.resolution) this.prepareResolution();
+    if (s.resolution) s.dice = structuredClone(s.resolution.orientation);
     let value = topFace(s.dice);
     if (e === "lucky" && value === 1 && !c.status.lucky) {
       c.status.lucky = true;
+      this.announceSkill(c);
       s.phase = "ready";
       this.note("幸运糖星：1 点自动重掷");
       return "reroll";
@@ -207,6 +247,7 @@ export class Game {
     if (e === "floor_three" && value <= 2 && !c.cooldown) {
       value = 3;
       c.cooldown = 2;
+      this.announceSkill(c);
       this.note("软底：按 3 点结算");
     }
     s.result = value;
@@ -285,6 +326,7 @@ export class Game {
       return false;
     }
     c.used = true;
+    this.announceSkill(c);
     c.cooldown = this.def.cooldown;
     this.note(`${this.def.character} · ${this.def.name}`);
     switch (e) {
@@ -454,11 +496,13 @@ export class Game {
     if (e === "high_jump" && s.result >= 5 && !c.cooldown) {
       n += 2;
       c.cooldown = 1;
+      s.events.push({ type: "skill", player: p.id, id: c.id });
     }
     if (e === "finish_burst" && (RELAYS[p.baton] ?? 100) - p.pos <= 8) n += 2;
     if (e === "six_extra" && s.result === 6 && !c.cooldown) {
       s.extra = true;
       c.cooldown = 2;
+      s.events.push({ type: "skill", player: p.id, id: c.id });
     }
     if (p.status.slow) n = Math.max(1, n - 2);
     n += (c.status.stored || 0) + (c.status.catchup || 0);
@@ -476,14 +520,28 @@ export class Game {
         ce = effect(p),
         char = active(p);
       if (!tile) break;
+      s.events.push({
+        type: "tile",
+        player: p.id,
+        pos: p.pos,
+        tile: tile.type,
+        value: tile.value,
+      });
       if (["retreat", "obstacle"].includes(tile.type)) {
         if (p.shield) {
           p.shield = false;
+          s.events.push({
+            type: "skill",
+            player: p.id,
+            id: char.id,
+            label: "糖壳护盾",
+          });
           this.note("糖壳护盾抵挡负面格");
           break;
         }
         if (ce === "dodge_tile" && !char.cooldown) {
           char.cooldown = 2;
+          s.events.push({ type: "skill", player: p.id, id: char.id });
           this.walk(-1);
           this.note("退步避险");
           break;
@@ -505,6 +563,7 @@ export class Game {
       }
       if (tile.type === "obstacle") {
         if (ce === "hurdle") {
+          s.events.push({ type: "skill", player: p.id, id: char.id });
           this.note("越障，再前进 1 格");
           this.walk(1);
           continue;
@@ -519,6 +578,7 @@ export class Game {
       break;
     }
     if (advanced && effect(p) === "advance_glide" && s.phase !== "ended") {
+      s.events.push({ type: "skill", player: p.id, id: active(p).id });
       this.note("加速余势 +1");
       this.walk(1);
     }

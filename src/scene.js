@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 import { TRACK, COLORS, CHARACTERS, definition, active } from "./game.js";
+import { validTablePoint, throwPosition } from "./dice.js";
 
 const TAU = Math.PI * 2;
 const v = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
@@ -76,7 +77,7 @@ export class BoardScene {
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.25;
+    this.renderer.toneMappingExposure = 1.1;
     container.appendChild(this.renderer.domElement);
     this.camera = new THREE.PerspectiveCamera(39, 1, 0.1, 200);
     this.target = v(0, 0, 0);
@@ -88,6 +89,14 @@ export class BoardScene {
     this.pawns = [];
     this.effects = [];
     this.mode = "menu";
+    this.view = "isometric";
+    this.yaw = 0.48;
+    this.wantYaw = 0.48;
+    this.elevation = 0.65;
+    this.wantElevation = 0.65;
+    this.actionMarkers = new THREE.Group();
+    this.ambient = [];
+    this.restQuaternion = new THREE.Quaternion();
     this.time = 0;
     this.diceTween = null;
     this.raycaster = new THREE.Raycaster();
@@ -114,6 +123,8 @@ export class BoardScene {
     this.buildBoard();
     this.buildDice();
     this.buildDecor();
+    this.buildFestival();
+    this.tray.add(this.actionMarkers);
     this.setPlayers(
       COLORS.map((color, i) => ({
         id: i,
@@ -137,19 +148,19 @@ export class BoardScene {
       v(0, -2, 0),
     ).rotation.x = -Math.PI / 2;
     mesh(
-      rounded(44, 1.8, 25, 1.3),
+      rounded(54, 1.8, 35, 1.3),
       material("#33594e"),
       this.world,
       v(0, -0.7, 0),
     );
     mesh(
-      rounded(43.8, 0.32, 24.8, 1.3),
+      rounded(53.8, 0.32, 34.8, 1.3),
       material("#eed6a5"),
       this.world,
       v(0, 0.16, 0),
     );
     mesh(
-      rounded(42.8, 0.2, 23.8, 1.2),
+      rounded(52.8, 0.2, 33.8, 1.2),
       material("#adc39a"),
       this.world,
       v(0, 0.4, 0),
@@ -632,8 +643,9 @@ export class BoardScene {
       }[dir];
       endPos.addScaledVector(vector, steps * 0.62);
     } else {
-      endPos.x = THREE.MathUtils.clamp((gesture?.x ?? 110) * 0.012, -2.5, 2.5);
-      endPos.z = THREE.MathUtils.clamp((gesture?.z ?? -80) * 0.012, -2.5, 2.5);
+      const landing = throwPosition(gesture);
+      endPos.x = landing.x;
+      endPos.z = landing.z;
     }
     const radius = Math.hypot(endPos.x, endPos.z);
     if (radius > 3.4) {
@@ -652,7 +664,7 @@ export class BoardScene {
       steps,
     };
   }
-  wind(dir) {
+  wind(dir, color = "#e9f9dc") {
     const d = {
       right: v(1, 0, 0),
       left: v(-1, 0, 0),
@@ -662,7 +674,7 @@ export class BoardScene {
     for (let i = 0; i < 16; i++) {
       const m = mesh(
         new THREE.SphereGeometry(0.04, 6, 4),
-        new THREE.MeshBasicMaterial({ color: "#e9f9dc", transparent: true }),
+        new THREE.MeshBasicMaterial({ color, transparent: true }),
         this.tray,
         v(
           -d.x * 4 + Math.random(),
@@ -680,18 +692,18 @@ export class BoardScene {
       });
     }
   }
-  hammer() {
+  hammer(point = { x: 0, z: 0 }, color = "#ffe3a1") {
     this.shake = this.time;
     for (let i = 0; i < 3; i++) {
       const m = mesh(
         new THREE.RingGeometry(0.9, 1, 48),
         new THREE.MeshBasicMaterial({
-          color: "#ffe3a1",
+          color,
           transparent: true,
           side: THREE.DoubleSide,
         }),
         this.tray,
-        v(0, 0.99 + i * 0.01, 0),
+        v(point.x, 0.99 + i * 0.01, point.z),
       );
       m.rotation.x = -Math.PI / 2;
       this.effects.push({
@@ -702,11 +714,418 @@ export class BoardScene {
       });
     }
   }
+  setView(view) {
+    this.view = view;
+    this.wantYaw = view === "top" ? 0 : view === "reverse" ? -0.6 : 0.48;
+    this.wantElevation =
+      view === "top" ? 1.36 : view === "cinema" ? 0.43 : 0.65;
+  }
+  tablePoint(x, y) {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.mouse.set(
+      ((x - rect.left) / rect.width) * 2 - 1,
+      (-(y - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(this.mouse, this.camera);
+    const p = this.raycaster.ray.intersectPlane(
+      new THREE.Plane(v(0, 1, 0), -0.97),
+      v(),
+    );
+    if (!p) return null;
+    this.tray.worldToLocal(p);
+    return validTablePoint(p) ? { x: p.x, z: p.z } : null;
+  }
+  setSuspense(value) {
+    this.suspense = value;
+    if (!value && !this.diceTween) {
+      this.die.quaternion.copy(this.restQuaternion);
+      this.die.position.y = 1.81;
+    }
+  }
+  holdDice(seconds = 0.28) {
+    this.holdUntil = this.time + seconds;
+    this.heldPose = this.die.quaternion.clone();
+    this.heldY = this.die.position.y;
+  }
+  clearActions() {
+    this.actionMarkers.traverse((o) => {
+      o.geometry?.dispose();
+      if (o.material) {
+        o.material.map?.dispose();
+        o.material.dispose();
+      }
+    });
+    this.actionMarkers.clear();
+    this.aim = null;
+  }
+  aimAt(point, color, power = 0.3) {
+    if (!point) {
+      if (this.aim) this.aim.visible = false;
+      return;
+    }
+    if (!this.aim) {
+      this.aim = mesh(
+        new THREE.RingGeometry(0.34, 0.39, 48),
+        new THREE.MeshBasicMaterial({
+          color,
+          side: THREE.DoubleSide,
+          transparent: true,
+        }),
+        this.actionMarkers,
+        v(),
+      );
+      this.aim.rotation.x = -Math.PI / 2;
+    }
+    this.aim.visible = true;
+    this.aim.position.set(point.x, 1.01, point.z);
+    this.aim.material.color.set(color);
+    this.aim.scale.setScalar(0.8 + power * 0.6);
+  }
+  markAction(action, color) {
+    const g = new THREE.Group();
+    this.actionMarkers.add(g);
+    let point = action.point;
+    if (!point) {
+      const d = { right: [-1, 0], left: [1, 0], up: [0, 1], down: [0, -1] }[
+        action.dir
+      ];
+      point = { x: d[0] * 4.1, z: d[1] * 4.1 };
+    }
+    g.position.set(point.x, 1.03, point.z);
+    const ring = mesh(
+      new THREE.RingGeometry(0.27, 0.34, 32),
+      new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide }),
+      g,
+    );
+    ring.rotation.x = -Math.PI / 2;
+    const tag = mesh(
+      new THREE.PlaneGeometry(0.75, 0.75),
+      new THREE.MeshBasicMaterial({
+        map: textTexture(`P${action.seat + 1}`, color),
+        transparent: true,
+        depthWrite: false,
+      }),
+      g,
+      v(0, 0.05, 0),
+    );
+    tag.rotation.x = -Math.PI / 2;
+    const line = new THREE.BufferGeometry().setFromPoints([
+      v(0, 0, 0),
+      v(this.die.position.x - point.x, 0.02, this.die.position.z - point.z),
+    ]);
+    g.add(
+      new THREE.Line(
+        line,
+        new THREE.LineDashedMaterial({
+          color,
+          dashSize: 0.18,
+          gapSize: 0.12,
+          transparent: true,
+          opacity: 0.65,
+        }),
+      ),
+    );
+    g.children.at(-1).computeLineDistances();
+    if (action.kind === "hammer") this.hammer(point, color);
+    else this.wind(action.dir, color);
+  }
+  tileEffect(index, type, color = null) {
+    const p = trackPoint(index),
+      colors = {
+        advance: "#7affba",
+        retreat: "#ff806a",
+        obstacle: "#ffd456",
+        event: "#78d9ff",
+        relay: "#c7a1ff",
+        normal: "#fff3c5",
+        finish: "#ffd461",
+      };
+    color ||= colors[type] || "#ffe2a4";
+    for (let j = 0; j < 3; j++) {
+      const m = mesh(
+        new THREE.RingGeometry(0.4, 0.52, 48),
+        new THREE.MeshBasicMaterial({
+          color,
+          transparent: true,
+          side: THREE.DoubleSide,
+        }),
+        this.world,
+        v(p.x, 0.86 + j * 0.025, p.z),
+      );
+      m.rotation.x = -Math.PI / 2;
+      this.effects.push({
+        mesh: m,
+        kind: "ring",
+        at: this.time + j * 0.12,
+        life: 1.1,
+      });
+    }
+    for (let i = 0; i < (type === "normal" ? 8 : 28); i++) {
+      const m = mesh(
+        new THREE.OctahedronGeometry(0.09 + Math.random() * 0.06),
+        new THREE.MeshBasicMaterial({ color, transparent: true }),
+        this.world,
+        v(p.x, 0.9, p.z),
+      );
+      const a = i * 2.4;
+      this.effects.push({
+        mesh: m,
+        kind: "burst",
+        at: this.time,
+        life: 1.25,
+        dir: v(
+          Math.cos(a) * (1 + Math.random()),
+          2 + Math.random() * 2,
+          Math.sin(a) * (1 + Math.random()),
+        ),
+      });
+    }
+  }
+  buildFestival() {
+    // Four miniature patisserie districts around the playable board.
+    const shop = (x, z, color, name, kind = 0) => {
+      const g = new THREE.Group();
+      g.position.set(x, 0.53, z);
+      this.world.add(g);
+      mesh(rounded(3.3, 2.1, 2.5, 0.2), material("#f7e1b5"), g, v(0, 1.05, 0));
+      mesh(rounded(3.65, 0.5, 2.9, 0.23), material(color), g, v(0, 2.15, 0));
+      const roof = mesh(
+        new THREE.ConeGeometry(2.55, 1.35, 4),
+        material(color),
+        g,
+        v(0, 3, 0),
+      );
+      roof.rotation.y = Math.PI / 4;
+      roof.scale.z = 0.8;
+      mesh(
+        rounded(0.7, 1.25, 0.08, 0.12),
+        material("#765b55"),
+        g,
+        v(0, 0.7, 1.27),
+      );
+      for (const xx of [-1, 1]) {
+        mesh(
+          rounded(0.6, 0.75, 0.1, 0.1),
+          material("#83ccd4"),
+          g,
+          v(xx, 1.1, 1.3),
+        );
+        mesh(
+          rounded(0.69, 0.1, 0.16, 0.02),
+          material("#fff5d6"),
+          g,
+          v(xx, 1.15, 1.4),
+        );
+      }
+      for (let i = 0; i < 8; i++)
+        mesh(
+          rounded(0.43, 0.16, 0.7, 0.04),
+          material(i % 2 ? "#fff1d3" : color),
+          g,
+          v(-1.5 + i * 0.43, 1.88, 1.5),
+        );
+      const sign = mesh(
+        new THREE.PlaneGeometry(2, 0.65),
+        new THREE.MeshBasicMaterial({
+          map: textTexture(name, "#624d48", "#fff0cc"),
+        }),
+        g,
+        v(0, 2.16, 1.48),
+      );
+      if (kind === 0) {
+        const donut = mesh(
+          new THREE.TorusGeometry(0.6, 0.23, 10, 24),
+          material("#e9a885"),
+          g,
+          v(0, 4.07, 0),
+        );
+        donut.rotation.z = 0.2;
+        for (let i = 0; i < 8; i++)
+          mesh(
+            new THREE.SphereGeometry(0.07, 6, 6),
+            material("#fbc7d5"),
+            g,
+            v(Math.cos(i) * 0.61, 4.07 + Math.sin(i) * 0.61, 0.2),
+          );
+      }
+      if (kind === 1) {
+        mesh(
+          new THREE.CylinderGeometry(0.7, 0.85, 0.55, 20),
+          material("#aa8cce"),
+          g,
+          v(0, 3.9, 0),
+        );
+        mesh(
+          new THREE.SphereGeometry(0.55, 16, 10),
+          material("#fff2dd"),
+          g,
+          v(0, 4.18, 0),
+        );
+        mesh(
+          new THREE.SphereGeometry(0.17, 12, 8),
+          material("#e87379"),
+          g,
+          v(0, 4.68, 0),
+        );
+      }
+      return g;
+    };
+    shop(-6, -13, "#e8969a", "莓果甜屋", 0);
+    shop(0, -14, "#a5c9ac", "薄荷茶社", 1);
+    shop(7, -13, "#e7bb73", "焦糖工坊", 0);
+    shop(22, -4, "#af9ecb", "星糖魔法", 1);
+    // Animated candy ferris wheel, with hanging pastry gondolas.
+    const fair = new THREE.Group();
+    fair.position.set(-17, 0.55, -12.5);
+    this.world.add(fair);
+    for (const x of [-1.4, 1.4]) {
+      const pole = mesh(
+        new THREE.CylinderGeometry(0.13, 0.18, 5.4, 8),
+        material("#eddbb5"),
+        fair,
+        v(x, 2.6, 0),
+      );
+      pole.rotation.z = x > 0 ? 0.25 : -0.25;
+    }
+    const wheel = new THREE.Group();
+    wheel.position.set(0, 5, 0.1);
+    fair.add(wheel);
+    mesh(
+      new THREE.TorusGeometry(3.35, 0.12, 8, 64),
+      material("#e5ac9b"),
+      wheel,
+    );
+    mesh(
+      new THREE.TorusGeometry(2.92, 0.07, 6, 64),
+      material("#fff0d3"),
+      wheel,
+    );
+    for (let i = 0; i < 10; i++) {
+      const a = (i * TAU) / 10;
+      const spoke = mesh(
+        new THREE.CylinderGeometry(0.045, 0.045, 6.7, 6),
+        material("#f9e7c8"),
+        wheel,
+      );
+      spoke.rotation.z = a;
+      const cabin = mesh(
+        rounded(0.75, 0.78, 0.65, 0.2),
+        material(COLORS[i % 4]),
+        wheel,
+        v(Math.cos(a) * 3.35, Math.sin(a) * 3.35, 0.22),
+      );
+      mesh(
+        rounded(0.52, 0.32, 0.05, 0.05),
+        material("#fff4da"),
+        cabin,
+        v(0, 0.1, 0.35),
+      );
+    }
+    this.ambient.push({ kind: "wheel", mesh: wheel });
+    // A birthday-cake castle and a fountain plaza.
+    for (let i = 0; i < 3; i++)
+      mesh(
+        new THREE.CylinderGeometry(2.4 - i * 0.65, 2.4 - i * 0.65, 1.15, 32),
+        material(["#eab4b8", "#fff0d4", "#bad9c0"][i]),
+        this.world,
+        v(17, 0.55 + 0.6 + i * 1.15, -13),
+      );
+    for (let i = 0; i < 5; i++) {
+      const a = (i * TAU) / 5;
+      mesh(
+        new THREE.CylinderGeometry(0.07, 0.07, 0.7, 8),
+        material("#f6e4a6"),
+        this.world,
+        v(17 + Math.cos(a) * 0.65, 4.38, -13 + Math.sin(a) * 0.65),
+      );
+      const flame = mesh(
+        new THREE.SphereGeometry(0.13, 8, 8),
+        new THREE.MeshBasicMaterial({ color: "#ffd577" }),
+        this.world,
+        v(17 + Math.cos(a) * 0.65, 4.85, -13 + Math.sin(a) * 0.65),
+      );
+      this.ambient.push({ kind: "cloud", mesh: flame, base: 4.85, offset: i });
+    }
+    mesh(
+      new THREE.CylinderGeometry(2.15, 2.35, 0.35, 40),
+      material("#eee2c7"),
+      this.world,
+      v(-10, 0.65, 0.3),
+    );
+    mesh(
+      new THREE.CylinderGeometry(1.93, 1.93, 0.08, 40),
+      material("#7fcbd0", 0.18),
+      this.world,
+      v(-10, 0.86, 0.3),
+    );
+    mesh(
+      new THREE.CylinderGeometry(0.35, 0.55, 1.5, 16),
+      material("#e8e5ce"),
+      this.world,
+      v(-10, 1.6, 0.3),
+    );
+    mesh(
+      new THREE.SphereGeometry(0.6, 20, 14),
+      material("#96dadb", 0.16),
+      this.world,
+      v(-10, 2.45, 0.3),
+    );
+    // Lantern boulevard and confetti lights across the rear stalls.
+    for (let i = 0; i < 12; i++) {
+      const x = -24 + i * 4.35;
+      mesh(
+        new THREE.CylinderGeometry(0.055, 0.08, 2.15, 8),
+        material("#658b74"),
+        this.world,
+        v(x, 1.6, 13.2),
+      );
+      mesh(
+        new THREE.SphereGeometry(0.26, 12, 8),
+        new THREE.MeshStandardMaterial({
+          color: "#fff0bd",
+          emissive: "#ffc777",
+          emissiveIntensity: 0.45,
+        }),
+        this.world,
+        v(x, 2.8, 13.2),
+      );
+    }
+    for (let i = 0; i < 30; i++) {
+      const x = -22 + i * 1.5,
+        z = -9.4,
+        y = 3.7 + Math.cos((i / 29) * Math.PI * 2) * 0.5;
+      const flag = mesh(
+        new THREE.ConeGeometry(0.18, 0.38, 3),
+        material(COLORS[i % 4]),
+        this.world,
+        v(x, y, z),
+      );
+      flag.rotation.z = Math.PI;
+    }
+    // Elevated floating islands establish depth beyond the board.
+    for (const [x, z, s] of [
+      [-33, -27, 5],
+      [26, -29, 7],
+      [-30, 20, 4],
+    ]) {
+      const cloud = new THREE.Group();
+      cloud.position.set(x, 2, z);
+      this.scene.add(cloud);
+      for (let i = 0; i < 4; i++)
+        mesh(
+          new THREE.SphereGeometry(s * 0.38, 12, 8),
+          material("#f3eedf"),
+          cloud,
+          v((i - 1.5) * s * 0.4, Math.sin(i) * 0.4, 0),
+        );
+      this.ambient.push({ kind: "cloud", mesh: cloud, base: 2, offset: x });
+    }
+  }
   focus(mode) {
     this.mode = mode;
     this.pan.set(0, 0, 0);
     this.viewTarget.set(mode === "menu" ? -10 : 0, 0, 0);
-    this.wantDistance = mode === "dice" ? 21 : mode === "menu" ? 53 : 53;
+    this.wantDistance = mode === "dice" ? 22 : mode === "menu" ? 62 : 63;
   }
   zoom(delta) {
     this.wantDistance = THREE.MathUtils.clamp(
@@ -716,8 +1135,11 @@ export class BoardScene {
     );
   }
   drag(dx, dy) {
-    this.pan.x -= dx * 0.026;
-    this.pan.z -= dy * 0.035;
+    const c = Math.cos(this.yaw),
+      s = Math.sin(this.yaw),
+      scale = this.distance * 0.00065;
+    this.pan.x -= (dx * c + dy * s) * scale;
+    this.pan.z -= (-dx * s + dy * c) * scale;
     this.pan.clamp(v(-15, 0, -12), v(15, 0, 12));
   }
   pick(x, y) {
@@ -738,7 +1160,9 @@ export class BoardScene {
     this.camera.updateProjectionMatrix();
   }
   frame(now) {
-    const dt = this.paused ? 0 : Math.min((now - this.last) / 1000, 0.05);
+    const dt = this.paused
+      ? 0
+      : Math.max(0, Math.min((now - this.last) / 1000, 0.05));
     this.last = now;
     this.time += dt;
     this.distance = THREE.MathUtils.damp(
@@ -751,19 +1175,32 @@ export class BoardScene {
       this.viewTarget.clone().add(this.pan),
       1 - Math.exp(-4 * dt),
     );
+    this.yaw = THREE.MathUtils.damp(this.yaw, this.wantYaw, 4, dt);
+    this.elevation = THREE.MathUtils.damp(
+      this.elevation,
+      this.wantElevation,
+      4,
+      dt,
+    );
     const aspectAdjust =
       this.camera.aspect < 1.5 ? 1.5 / this.camera.aspect : 1;
     this.camera.position
       .copy(this.target)
       .add(
         v(
-          0,
-          this.distance * 0.69 * aspectAdjust,
-          this.distance * 0.72 * aspectAdjust,
+          Math.sin(this.yaw) *
+            Math.cos(this.elevation) *
+            this.distance *
+            aspectAdjust,
+          Math.sin(this.elevation) * this.distance * aspectAdjust,
+          Math.cos(this.yaw) *
+            Math.cos(this.elevation) *
+            this.distance *
+            aspectAdjust,
         ),
       );
     this.camera.lookAt(this.target);
-    if (this.diceTween) {
+    if (this.diceTween && this.time >= (this.hitstopUntil || 0)) {
       const a = this.diceTween,
         t = THREE.MathUtils.clamp((this.time - a.at) / a.duration, 0, 1),
         e = ease(t);
@@ -799,10 +1236,32 @@ export class BoardScene {
           : Math.abs(Math.sin(t * Math.PI * 3)) * 2.2) *
           (1 - t * 0.7);
       if (t === 1) {
+        this.restQuaternion.copy(a.end);
         this.die.quaternion.copy(a.end);
         this.die.position.y = 1.81;
         this.diceTween = null;
       }
+    }
+    if (!this.diceTween && this.suspense) {
+      const tilt = 0.13 + Math.sin(this.time * 2.4) * 0.035;
+      this.die.quaternion
+        .copy(this.restQuaternion)
+        .multiply(
+          new THREE.Quaternion().setFromEuler(
+            new THREE.Euler(tilt, Math.sin(this.time * 1.4) * 0.03, tilt * 0.7),
+          ),
+        );
+      this.die.position.y = 1.91 + Math.sin(this.time * 2) * 0.035;
+    }
+    if (this.heldPose && this.time < (this.holdUntil || 0)) {
+      this.die.quaternion.copy(this.heldPose);
+      this.die.position.y = this.heldY;
+    }
+    for (const a of this.ambient) {
+      if (a.kind === "wheel") a.mesh.rotation.z = this.time * 0.09;
+      if (a.kind === "cloud")
+        a.mesh.position.y =
+          a.base + Math.sin(this.time * 0.7 + a.offset) * 0.16;
     }
     this.aura.material.opacity = 0.3 + Math.sin(this.time * 2) * 0.12;
     this.aura.position.x = this.die.position.x;
@@ -823,7 +1282,11 @@ export class BoardScene {
       }
       a.mesh.material.opacity = Math.max(0, 1 - t);
       if (a.kind === "ring") a.mesh.scale.setScalar(1 + Math.max(0, t) * 4);
-      else a.mesh.position.addScaledVector(a.dir, dt);
+      else if (a.kind === "burst") {
+        a.mesh.position.addScaledVector(a.dir, dt);
+        a.dir.y -= dt * 3;
+        a.mesh.rotation.z += dt * 3;
+      } else a.mesh.position.addScaledVector(a.dir, dt);
       return true;
     });
     this.world.rotation.z =

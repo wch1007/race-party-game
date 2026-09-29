@@ -10,7 +10,14 @@ import {
   definition,
   TILE_LABELS,
 } from "./game.js";
-import { preview, topFace, DIRECTIONS } from "./dice.js";
+import {
+  combinedPreview,
+  hammerImpact,
+  DIRECTION_VECTORS,
+  topFace,
+  DIRECTIONS,
+} from "./dice.js";
+import { cutinMarkup, actionMarkup } from "./presentation.js";
 
 const $ = (s) => document.querySelector(s),
   app = $("#app");
@@ -87,6 +94,11 @@ let screen = "menu",
   drag = null,
   menuSeed = Date.now(),
   net = null;
+let shownSkill = 0,
+  cutin = null,
+  cutinSerial = 0,
+  lastPoint = null,
+  panMode = false;
 skinIndex = Math.max(0, Math.min(2, skinIndex));
 board.skin(skins[skinIndex].color);
 board.focus("menu");
@@ -135,7 +147,11 @@ function toast(text) {
   });
 }
 function renderFloating() {
-  document.querySelectorAll(".toast,.speech").forEach((e) => e.remove());
+  document
+    .querySelectorAll(".toast,.speech,.skill-cutin")
+    .forEach((e) => e.remove());
+  if (cutin)
+    app.insertAdjacentHTML("beforeend", cutinMarkup(cutin.def, cutin.label));
   if (toastText)
     app.insertAdjacentHTML(
       "beforeend",
@@ -147,14 +163,34 @@ function renderFloating() {
       `<div class="speech">${escape(speechText)}</div>`,
     );
 }
+function showSkill(id, label) {
+  const def = CHARACTERS.find((c) => c.id === id);
+  if (!def) return;
+  const serial = ++cutinSerial;
+  cutin = { def, label };
+  beep("relay");
+  renderFloating();
+  schedule(1.5, () => {
+    if (serial === cutinSerial) {
+      cutin = null;
+      renderFloating();
+    }
+  });
+}
 function avatar(c) {
   return `<span class="avatar variant-${CHARACTERS.indexOf(c) % 5}" style="--c:${c.color}"><i class="body"></i><i class="face"></i><i class="hat"></i><em>${c.glyph}</em></span>`;
 }
 function header() {
-  return `<header class="topbar"><div class="brand"><span class="brand-icon">⚄</span><div><strong>骰子派对</strong><small>DICE & DASH</small></div></div><nav class="top-actions">${screen === "game" ? `<button data-action="menu-confirm" aria-label="返回主菜单">${icon("home")}</button><button data-action="pause" aria-label="暂停游戏" ${net ? "disabled" : ""}>${icon("pause")}</button>` : `<button class="textbutton" data-action="skins">骰子工坊</button>`}<button data-action="sound" aria-label="${soundEnabled ? "关闭" : "开启"}音效">${icon(soundEnabled ? "sound" : "mute")}</button><button data-action="help" aria-label="游戏规则">${icon("help")}</button></nav></header>`;
+  return `<header class="topbar"><div class="brand"><span class="brand-icon">⚄</span><div><strong>骰子派对</strong><small>DICE & DASH</small></div></div><nav class="top-actions"><button class="textbutton" data-action="fullscreen" aria-label="切换全屏">⛶ 全屏</button>${screen === "game" ? `<button data-action="menu-confirm" aria-label="返回主菜单">${icon("home")}</button><button data-action="pause" aria-label="暂停游戏" ${net ? "disabled" : ""}>${icon("pause")}</button>` : `<button class="textbutton" data-action="skins">骰子工坊</button>`}<button data-action="sound" aria-label="${soundEnabled ? "关闭" : "开启"}音效">${icon(soundEnabled ? "sound" : "mute")}</button><button data-action="help" aria-label="游戏规则">${icon("help")}</button></nav></header>`;
 }
 function render() {
+  if (game?.state.lastSkill && game.state.lastSkill.serial !== shownSkill) {
+    shownSkill = game.state.lastSkill.serial;
+    showSkill(game.state.lastSkill.id, game.state.lastSkill.label);
+  }
   board.paused = paused;
+  if (game)
+    board.setSuspense(["intervene", "showdown"].includes(game.state.phase));
   let html = header();
   if (screen === "menu")
     html += `<main class="menu"><div class="eyebrow"><span class="live-dot"></span> A LITTLE LUCK. A LITTLE MISCHIEF.</div><h1>骰子派对<span>吹口气，翻个盘。</span></h1><p>运气落在哪一面，由你推一把。<br>带上四位搭档，跑一场热闹的接力赛。</p><button class="primary" data-action="solo">单人练习 <span class="arrow">↗</span></button><div class="menu-options"><button class="secondary" data-action="local">♧ &nbsp;本地派对</button><button class="secondary" data-action="online">⌁ &nbsp;联机房间</button></div><div class="menu-stats"><div><strong>2—4</strong><span>支队伍同场</span></div><div><strong>40</strong><span>位糖果选手</span></div><div><strong>100</strong><span>格接力赛道</span></div></div></main><div class="scene-caption">一点运气，亿点小动作。</div><div class="location"><strong>糖果运动场</strong><span>CANDY CIRCUIT · 01</span><small>拖动中键探索桌面 · 滚轮缩放</small></div><div class="version">DICE & DASH &nbsp; / &nbsp; WEB EDITION 01</div>`;
@@ -191,7 +227,8 @@ function gameHTML() {
     moving: "接力冲刺",
     skipped: "暂停一回合",
     ended: "比赛结束",
-    settling: "等待停稳",
+    settling: "合力翻面",
+    showdown: "全员亮招",
   };
   const hasSkill = game instanceof Game ? game.canSkill() : canSkillRemote();
   const skillStatus = c.cooldown
@@ -212,15 +249,16 @@ function gameHTML() {
           .map((t) => `<div class="log-line">${escape(t)}</div>`)
           .join("")}</aside>`
   }
-  ${["ready", "rolling", "intervene"].includes(phase) ? `<div class="hint">${phase === "ready" ? (p.ai ? "对手正在准备投骰…" : "拖住骰子，向前甩出去") : phase === "rolling" ? "先让骰子滚一会儿…" : "就是现在，改变这一面！"}<small>${phase === "ready" ? "拖拽骰盘区域，松手投掷 · 也可点击右下角按钮" : phase === "rolling" ? "接近停稳时，所有队伍都能干预" : "每队一次吹风 + 一次振桌 · 松手时锁定力度"}</small></div>` : ""}
+  ${["ready", "rolling", "intervene"].includes(phase) ? `<div class="hint">${phase === "ready" ? (p.ai ? "对手正在准备投骰…" : "拖住骰子，向前甩出去") : phase === "rolling" ? "先让骰子滚一会儿…" : "就是现在，改变这一面！"}<small>${phase === "ready" ? "拖拽骰盘区域，松手投掷 · 也可点击右下角按钮" : phase === "rolling" ? "接近停稳时，所有队伍都能干预" : "每队一次吹风 + 一次振桌 · 松手提交，全员一起结算"}</small></div>` : ""}
   ${phase === "result" ? `<div class="dice-result"><strong>${s.result}</strong><p>${s.result === topFace(s.dice) ? "骰 子 落 定" : "技 能 结 算"}</p></div>` : ""}
-  <div class="legend"><span><i style="background:#8ec9aa"></i>前进</span><span><i style="background:#edab95"></i>后退</span><span><i style="background:#e6c77d"></i>停一回合</span><span><i style="background:#b9a7d3"></i>接力</span></div><div class="camera-controls"><button data-action="overview">俯瞰赛场</button><button data-action="focus">${["ready", "rolling", "intervene", "result"].includes(phase) ? "回到骰盘" : "跟随选手"}</button><button data-action="zoom-in" aria-label="放大">＋</button><button data-action="zoom-out" aria-label="缩小">−</button></div>
+  ${["intervene", "showdown", "settling"].includes(phase) ? `<aside class="action-board panel ${s.players.length > 2 ? "many" : ""}"><div class="panel-label">ALL PLAYERS / 全员动作</div>${actionMarkup(s)}</aside>` : ""}${phase === "showdown" ? `<div class="showdown-banner"><small>EVERY MOVE COUNTS</small><strong>全员亮招 · 合力即将爆发</strong><span>先看清每个人的小动作，再见分晓。</span></div>` : ""}
+  <div class="legend"><span><i style="background:#8ec9aa"></i>前进</span><span><i style="background:#edab95"></i>后退</span><span><i style="background:#e6c77d"></i>停一回合</span><span><i style="background:#b9a7d3"></i>接力</span></div><div class="camera-controls"><select id="view-select" aria-label="切换视角"><option value="isometric" ${board.view === "isometric" ? "selected" : ""}>斜俯视角</option><option value="top" ${board.view === "top" ? "selected" : ""}>正上方全景</option><option value="cinema" ${board.view === "cinema" ? "selected" : ""}>低位观赛</option><option value="reverse" ${board.view === "reverse" ? "selected" : ""}>反向斜视</option></select><button data-action="pan-mode" class="${panMode ? "selected" : ""}">拖拽视野 ${panMode ? "开" : "关"}</button><button data-action="overview">俯瞰赛场</button><button data-action="focus">${["ready", "rolling", "intervene", "result"].includes(phase) ? "回到骰盘" : "跟随选手"}</button><button data-action="zoom-in" aria-label="放大">＋</button><button data-action="zoom-out" aria-label="缩小">−</button></div>
   <footer class="bottom-bar panel"><div class="current-character">${avatar(def)}<div><strong>${def.character}</strong><small>${escape(p.name)} / 第 ${p.baton + 1} 棒</small></div></div><button class="skill-button" data-action="skill" ${!hasSkill || p.ai || !canAct ? "disabled" : ""} title="${def.description}">${def.glyph} &nbsp; ${def.name} <span class="key">Q</span><small>${skillStatus} · ${def.description}</small></button><div class="action-area"><div class="action-copy">${phase === "ready" ? "你的下一步，从这一掷开始。" : phase === "intervene" ? "机会只有一瞬，松手见分晓。" : phase === "result" ? `本次点数 ${s.result}，准备出发。` : "让好运再跑一会儿。"}<small>${phase === "ready" ? "按住中键平移 · 滚轮缩放" : "第 24 / 49 / 74 格交棒 · 恰好到达奖励回合"}</small></div><button class="primary" data-action="primary" ${!canAct || p.ai || !["ready", "result", "skipped", "ended"].includes(phase) ? "disabled" : ""}>${phase === "ready" ? "甩出骰子 ↗" : phase === "result" ? "确认，向前跑 →" : phase === "skipped" ? "下一回合 →" : phase === "ended" ? "查看排名" : "进行中…"}</button></div></footer>`;
 }
 function interventionHTML() {
   const s = game.state,
     b = s.interventions[seat] || {};
-  return `<aside class="intervention panel"><div class="panel-label">MAKE YOUR MOVE</div><div class="timer-row"><h3>抢骰面时刻</h3><strong id="countdown">5.0<small>s</small></strong></div><div class="timer-track"><i id="timer-fill"></i></div><div class="seat-picker">${s.players.map((p) => `<button data-seat="${p.id}" class="${seat === p.id ? "selected" : ""}" ${net && p.id !== net.seat ? "disabled" : ""}>P${p.id + 1}</button>`).join("")}</div><div class="micro">${escape(s.players[seat].name)} · 当前朝上 <b id="top-face">${topFace(s.dice)}</b> 点</div><div class="wind-pad"><button data-wind="up" ${b.wind ? "disabled" : ""} aria-label="向上吹风">↑ <small>W</small></button><button data-wind="left" ${b.wind ? "disabled" : ""} aria-label="向左吹风">← <small>A</small></button><button data-wind="down" ${b.wind ? "disabled" : ""} aria-label="向下吹风">↓ <small>S</small></button><button data-wind="right" ${b.wind ? "disabled" : ""} aria-label="向右吹风">→ <small>D</small></button></div><button class="hammer-button" data-hammer="true" ${b.hammer ? "disabled" : ""}>${b.hammer ? "✓ 本队振桌已使用" : "⌁ 按住蓄力，松手振桌"}</button><div class="power-label"><span id="power-direction">向右吹风 · 力度</span><b id="power-number">30%</b></div><div class="power-track"><i id="power-marker"></i></div><div class="probabilities" id="probabilities"></div><p class="micro" style="margin-bottom:0">按住后力度往返变化，2 秒自动释放。<br>下方显示当前方向和力度的翻面概率。</p></aside>`;
+  return `<aside class="intervention panel"><div class="panel-label">MAKE YOUR MOVE</div><div class="timer-row"><h3>抢骰面时刻</h3><strong id="countdown">5.0<small>s</small></strong></div><div class="timer-track"><i id="timer-fill"></i></div><div class="seat-picker">${s.players.map((p) => `<button data-seat="${p.id}" class="${seat === p.id ? "selected" : ""}" ${net && p.id !== net.seat ? "disabled" : ""}>P${p.id + 1}</button>`).join("")}</div><div class="micro">${escape(s.players[seat].name)} · 当前朝上 <b id="top-face">${topFace(s.dice)}</b> 点</div><div class="wind-pad"><button data-wind="up" ${b.wind ? "disabled" : ""} aria-label="向上吹风">↑ <small>W</small></button><button data-wind="left" ${b.wind ? "disabled" : ""} aria-label="向左吹风">← <small>A</small></button><button data-wind="down" ${b.wind ? "disabled" : ""} aria-label="向下吹风">↓ <small>S</small></button><button data-wind="right" ${b.wind ? "disabled" : ""} aria-label="向右吹风">→ <small>D</small></button></div><button class="hammer-button" data-hammer="true" ${b.hammer ? "disabled" : ""}>${b.hammer ? "✓ 本队振桌已使用" : "⌁ 按住蓄力，松手振桌"}</button><div class="power-label"><span id="power-direction">向右吹风 · 力度</span><b id="power-number">30%</b></div><div class="power-track"><i id="power-marker"></i></div><div class="probabilities" id="probabilities"></div><p class="micro" style="margin-bottom:0">按住后力度往返变化，2 秒自动释放。<br>桌布任意点可敲击；距离越近传力越强。下方是全员合力预测。</p></aside>`;
 }
 function modalHTML() {
   let body = "";
@@ -295,12 +333,14 @@ function ready() {
 function doRoll(gesture = null) {
   if (!game) return;
   if (net) {
-    send({ type: "action", action: "roll" });
+    send({ type: "action", action: "roll", gesture });
     return;
   }
-  if (!game.roll()) return;
+  if (!game.roll(gesture)) return;
   charge = null;
+  board.clearActions();
   board.focus("dice");
+  board.setSuspense(true);
   board.orient(game.state.dice, 1.65, null, 0, gesture);
   beep("roll");
   render();
@@ -310,11 +350,12 @@ function doRoll(gesture = null) {
     lastPower = 0.3;
     lastDir = "right";
     lastKind = "wind";
+    lastPoint = null;
     windowLength = game.windowSeconds();
     deadline = clock + windowLength;
     render();
     for (const p of game.state.players)
-      if (p.ai)
+      if (p.ai) {
         schedule(1.1 + game.rng(), () => {
           if (game.state.phase === "intervene")
             applyIntervention(
@@ -324,19 +365,50 @@ function doRoll(gesture = null) {
               0.15 + game.rng() * 0.7,
             );
         });
+        schedule(3, () => {
+          if (game.state.phase === "intervene") {
+            const die = game.state.dicePosition;
+            applyIntervention(p.id, "hammer", "right", 0.5, {
+              x: die.x - 1.3,
+              z: die.z,
+            });
+          }
+        });
+      }
     schedule(windowLength, () => {
       if (charge) releaseCharge();
-      game.state.phase = "settling";
+      game.prepareResolution();
       render();
-      schedule(0.7, () => {
-        game.state.phase = "intervene";
-        game.settle();
-        beep("result");
+      schedule(1.25, () => {
+        game.state.phase = "settling";
         render();
-        if (game.state.phase === "ready") ready();
-        else aiContinue();
+        presentResolution(game.state);
+        schedule(1.65, () => {
+          game.settle();
+          board.setSuspense(false);
+          beep("result");
+          render();
+          if (game.state.phase === "ready") ready();
+          else aiContinue();
+        });
       });
     });
+  });
+}
+function presentResolution(state) {
+  board.setSuspense(true);
+  board.holdDice(0.28);
+  const result = state.resolution;
+  if (!result) return;
+  schedule(0.28, () => {
+    board.setSuspense(false);
+    for (const a of state.pendingActions) {
+      const color = state.players[a.seat].color;
+      if (a.kind === "wind") board.wind(a.dir, color);
+      else board.hammer(a.point, color);
+    }
+    board.orient(result.orientation, 1.15, result.dir, result.steps);
+    beep("hammer");
   });
 }
 function aiContinue() {
@@ -348,22 +420,28 @@ function aiContinue() {
       else if (game.state.phase === "skipped") nextTurn();
     });
 }
-function applyIntervention(who, kind, dir, power) {
+function applyIntervention(who, kind, dir, power, point = null) {
   if (net) {
-    send({ type: "action", action: "interfere", kind, dir, power });
+    send({ type: "action", action: "interfere", kind, dir, power, point });
     return;
   }
-  const r = game.interfere(who, kind, dir, power);
-  if (!r) return;
-  animateIntervention(r);
+  const action = game.interfere(who, kind, dir, power, point);
+  if (!action) return;
+  animateIntervention(action);
   render();
 }
-function animateIntervention(r) {
-  board.orient(r.orientation, 0.48, r.dir, r.steps);
-  if (r.kind === "wind") board.wind(r.dir);
-  else board.hammer();
-  beep(r.kind);
-  toast(`${r.steps ? `翻过 ${r.steps} 面` : "稳住了"} · 现在 ${r.face} 点朝上`);
+function animateIntervention(action) {
+  const player = game.state.players[action.seat];
+  board.markAction(action, player.color);
+  beep(action.kind);
+  toast(
+    player.name +
+      " · " +
+      (action.kind === "wind" ? "吹风" : "振桌") +
+      " " +
+      Math.round(action.power * 100) +
+      "% 已提交",
+  );
 }
 function doMove() {
   if (net) {
@@ -387,6 +465,21 @@ function playEvents(events, done) {
   for (const e of events) {
     schedule(delay, () => {
       if (e.type === "step") board.placePawn(e.player, e.pos, 0.16);
+      if (e.type === "tile") {
+        board.tileEffect(e.pos, e.tile);
+        toast(
+          "第 " +
+            e.pos +
+            " 格 · " +
+            (e.tile === "event"
+              ? e.value > 0
+                ? "糖果祝福 +1"
+                : "酸糖恶作剧 −1"
+              : TILE_LABELS[e.tile]),
+        );
+        beep(e.tile === "retreat" ? "hammer" : "result");
+      }
+      if (e.type === "skill") showSkill(e.id, e.label);
       if (e.type === "relay") {
         beep("relay");
         toast(
@@ -402,7 +495,14 @@ function playEvents(events, done) {
         });
       }
     });
-    delay += e.type === "step" ? 0.18 : 0.1;
+    delay +=
+      e.type === "step"
+        ? 0.18
+        : e.type === "tile"
+          ? 0.85
+          : e.type === "skill"
+            ? 1.5
+            : 0.1;
   }
   schedule(delay + 0.1, done);
 }
@@ -435,12 +535,11 @@ function skill(choice) {
     render();
     return;
   }
-  beep("relay");
   board.syncPlayers(game.state.players);
   render();
   if (game.state.phase === "ready") board.focus("dice");
 }
-function startCharge(kind, dir) {
+function startCharge(kind, dir, point = null) {
   if (
     paused ||
     modal ||
@@ -450,7 +549,14 @@ function startCharge(kind, dir) {
     charge
   )
     return;
-  charge = { kind, dir, start: clock, seat };
+  if (kind === "hammer") {
+    point ||= lastPoint || {
+      x: game.state.dicePosition.x - 1,
+      z: game.state.dicePosition.z,
+    };
+    lastPoint = point;
+  }
+  charge = { kind, dir, point, start: clock, seat };
   lastDir = dir;
   lastKind = kind;
   beep();
@@ -462,27 +568,25 @@ function powerNow() {
 }
 function releaseCharge() {
   if (!charge) return;
-  const { kind, dir, seat: who } = charge;
+  const { kind, dir, point, seat: who } = charge;
   lastPower = powerNow();
   charge = null;
-  applyIntervention(who, kind, dir, lastPower);
+  board.aimAt(null);
+  applyIntervention(who, kind, dir, lastPower, point);
 }
 function updateMeters() {
   if (!game || game.state.phase !== "intervene") return;
-  const left = Math.max(0, deadline - clock);
-  if ($("#countdown"))
-    $("#countdown").innerHTML = `${left.toFixed(1)}<small>s</small>`;
-  if ($("#timer-fill"))
-    $("#timer-fill").style.width = `${(left / windowLength) * 100}%`;
-  const power = powerNow(),
+  const left = Math.max(0, deadline - clock),
+    power = powerNow(),
     dir = charge?.dir || lastDir,
     kind = charge?.kind || lastKind;
+  if ($("#countdown"))
+    $("#countdown").innerHTML = left.toFixed(1) + "<small>s</small>";
+  if ($("#timer-fill"))
+    $("#timer-fill").style.width = (left / windowLength) * 100 + "%";
   if ($("#power-number"))
-    $("#power-number").textContent = `${Math.round(power * 100)}%`;
-  if ($("#power-marker")) $("#power-marker").style.left = `${power * 100}%`;
-  if ($("#power-direction"))
-    $("#power-direction").textContent =
-      `${DIRECTIONS[dir]}${kind === "wind" ? "吹风" : "振桌"} · 力度`;
+    $("#power-number").textContent = Math.round(power * 100) + "%";
+  if ($("#power-marker")) $("#power-marker").style.left = power * 100 + "%";
   const pl = game.state.players[seat],
     ef = definition(active(pl)).effect,
     boost = ef === (kind === "wind" ? "wind_bonus" : "hammer_bonus") ? 1.25 : 1;
@@ -491,16 +595,43 @@ function updateMeters() {
     const dirs = ["up", "right", "down", "left"];
     actualDir = dirs[(dirs.indexOf(dir) + 1) % 4];
   }
+  const point = charge?.point ||
+    lastPoint || {
+      x: game.state.dicePosition.x - 1,
+      z: game.state.dicePosition.z,
+    };
+  const impact =
+    kind === "hammer"
+      ? hammerImpact(point, game.state.dicePosition, power * boost)
+      : {
+          effectivePower: Math.min(1, power * boost),
+          vector: DIRECTION_VECTORS[actualDir].map(
+            (n) => n * Math.min(1, power * boost),
+          ),
+          lift: 0,
+        };
+  const actions = [...(game.state.pendingActions || [])];
+  if (!game.state.interventions[seat]?.[kind])
+    actions.push({ ...impact, seat, kind });
+  if ($("#power-direction"))
+    $("#power-direction").textContent =
+      kind === "hammer"
+        ? "落锤距离 " +
+          impact.distance.toFixed(1) +
+          " · 传力 " +
+          Math.round(impact.attenuation * 100) +
+          "%"
+        : DIRECTIONS[actualDir] + "吹风 · 力度";
+  if (charge?.kind === "hammer") board.aimAt(point, pl.color, power);
   if ($("#probabilities"))
-    $("#probabilities").innerHTML = preview(
-      game.state.dice,
-      actualDir,
-      power * boost,
-      kind,
-    )
+    $("#probabilities").innerHTML = combinedPreview(game.state.dice, actions)
       .map(
         (x) =>
-          `<div class="prob"><b>${x.face}</b><span>${(x.probability * 100).toFixed(1)}%</span><small>${x.steps ? `翻 ${x.steps} 面` : "不变"}</small></div>`,
+          '<div class="prob"><b>' +
+          x.face +
+          "</b><span>" +
+          (x.probability * 100).toFixed(1) +
+          "%</span></div>",
       )
       .join("");
 }
@@ -508,9 +639,13 @@ function exitGame() {
   generation++;
   tasks = [];
   charge = null;
+  cutin = null;
+  board.clearActions();
+  board.setSuspense(false);
   paused = false;
   modal = null;
   game = null;
+  shownSkill = 0;
   screen = "menu";
   toastText = "";
   speechText = "";
@@ -634,6 +769,17 @@ app.addEventListener("click", (e) => {
     case "exit":
       exitGame();
       break;
+    case "fullscreen":
+      if (document.fullscreenElement) document.exitFullscreen();
+      else
+        document.documentElement
+          .requestFullscreen()
+          .catch(() => toast("当前内嵌窗口不支持全屏，请在独立浏览器中打开"));
+      break;
+    case "pan-mode":
+      panMode = !panMode;
+      render();
+      break;
     case "overview":
       board.focus("board");
       break;
@@ -696,6 +842,9 @@ app.addEventListener("click", (e) => {
       break;
   }
 });
+app.addEventListener("change", (e) => {
+  if (e.target.id === "view-select") board.setView(e.target.value);
+});
 app.addEventListener("pointerdown", (e) => {
   const wind = e.target.closest("[data-wind]"),
     hammer = e.target.closest("[data-hammer]");
@@ -729,28 +878,25 @@ window.addEventListener("pointercancel", () => {
 const canvas = board.renderer.domElement;
 canvas.addEventListener("pointerdown", (e) => {
   if (modal || paused) return;
+  const point = board.tablePoint(e.clientX, e.clientY);
+  const pan =
+    e.button === 1 || e.button === 2 || panMode || (!point && e.button === 0);
   drag = {
     x: e.clientX,
     y: e.clientY,
     lastX: e.clientX,
     lastY: e.clientY,
-    button: e.button,
+    button: pan ? 1 : e.button,
   };
   canvas.setPointerCapture(e.pointerId);
-  if (e.button === 1) e.preventDefault();
-  if (e.button === 0 && game?.state.phase === "intervene") {
-    const rect = canvas.getBoundingClientRect(),
-      cx = e.clientX - rect.width / 2,
-      cy = e.clientY - rect.height / 2;
-    lastDir =
-      Math.abs(cx) > Math.abs(cy)
-        ? cx < 0
-          ? "right"
-          : "left"
-        : cy < 0
-          ? "down"
-          : "up";
-    startCharge("hammer", lastDir);
+  if (pan) {
+    e.preventDefault();
+    return;
+  }
+  if (e.button === 0 && point && game?.state.phase === "intervene") {
+    lastPoint = point;
+    const impact = hammerImpact(point, game.state.dicePosition, 0.3);
+    startCharge("hammer", impact.dir, point);
   }
 });
 canvas.addEventListener("pointermove", (e) => {
@@ -758,6 +904,14 @@ canvas.addEventListener("pointermove", (e) => {
     board.drag(e.clientX - drag.lastX, e.clientY - drag.lastY);
     drag.lastX = e.clientX;
     drag.lastY = e.clientY;
+  }
+  if (!drag && game?.state.phase === "intervene" && !panMode) {
+    const point = board.tablePoint(e.clientX, e.clientY);
+    board.aimAt(point, game.state.players[seat].color, 0.3);
+    if (point) {
+      lastPoint = point;
+      lastKind = "hammer";
+    }
   }
   if (!drag && screen === "game" && board.mode !== "dice") {
     const t = board.pick(e.clientX, e.clientY);
@@ -807,7 +961,7 @@ window.addEventListener("blur", () => {
   drag = null;
 });
 function tick(now) {
-  const dt = Math.min((now - lastTime) / 1000, 0.1);
+  const dt = Math.max(0, Math.min((now - lastTime) / 1000, 0.1));
   lastTime = now;
   if (!paused) {
     clock += dt;
@@ -909,7 +1063,11 @@ function receiveState(msg) {
   const s = msg.state;
   if (first) board.setPlayers(s.players);
   if (s.phase === "rolling" && previous?.phase !== "rolling") {
-    board.orient(s.dice, 1.65);
+    board.clearActions();
+    board.orient(s.dice, 1.65, null, 0, {
+      x: s.dicePosition.x / 0.012,
+      z: s.dicePosition.z / 0.012,
+    });
     board.focus("dice");
     beep("roll");
   }
@@ -924,6 +1082,9 @@ function receiveState(msg) {
     )
       animateIntervention(s.lastIntervention);
   }
+  if (s.phase === "settling" && previous?.phase !== "settling")
+    presentResolution(s);
+
   if (s.phase === "moving" || s.phase === "ended") {
     if (previous?.phase !== s.phase) {
       board.focus("board");

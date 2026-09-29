@@ -7,7 +7,8 @@ export function createPartyServer({
   port = Number(process.env.PORT) || 8787,
   host = process.env.HOST || "0.0.0.0",
   rollMs = 1700,
-  settleMs = 700,
+  settleMs = 1650,
+  showdownMs = 1250,
 } = {}) {
   const wss = new WebSocketServer({ port, host, maxPayload: 4096 }),
     rooms = new Map();
@@ -61,22 +62,25 @@ export function createPartyServer({
         }
       });
   }
-  function roll(room) {
+  function roll(room, gesture) {
     const g = room.game;
-    if (!g.roll()) return;
+    if (!g.roll(gesture)) return;
     broadcast(room);
     later(room, rollMs, () => {
       g.openIntervention();
       room.deadline = Date.now() + g.windowSeconds() * 1000;
       broadcast(room);
       later(room, g.windowSeconds() * 1000, () => {
-        g.state.phase = "settling";
+        g.prepareResolution();
         broadcast(room);
-        later(room, settleMs, () => {
-          g.state.phase = "intervene";
-          g.settle();
+        later(room, showdownMs, () => {
+          g.state.phase = "settling";
           broadcast(room);
-          ai(room);
+          later(room, settleMs, () => {
+            g.settle();
+            broadcast(room);
+            ai(room);
+          });
         });
       });
     });
@@ -88,7 +92,15 @@ export function createPartyServer({
     if (g.state.winner !== null) return;
     const time =
       g.state.events.reduce(
-        (sum, e) => sum + (e.type === "step" ? 180 : 100),
+        (sum, e) =>
+          sum +
+          (e.type === "step"
+            ? 180
+            : e.type === "tile"
+              ? 850
+              : e.type === "skill"
+                ? 1500
+                : 100),
         0,
       ) + 1100;
     later(room, time, () => {
@@ -189,11 +201,20 @@ export function createPartyServer({
         if (g.state.winner !== null) return;
         if (m.action === "interfere") {
           if (Date.now() > room.deadline) return;
-          if (g.interfere(seat, m.kind, m.dir, m.power)) broadcast(room);
+          if (g.interfere(seat, m.kind, m.dir, m.power, m.point))
+            broadcast(room);
           return;
         }
         if (g.state.current !== seat) return;
-        if (m.action === "roll") roll(room);
+        if (m.action === "roll") {
+          const gesture = m.gesture;
+          if (
+            gesture &&
+            (!Number.isFinite(gesture.x) || !Number.isFinite(gesture.z))
+          )
+            return;
+          roll(room, gesture);
+        }
         if (
           m.action === "skill" &&
           g.skill(m.choice === -1 ? -1 : m.choice === 0 ? 0 : 1)

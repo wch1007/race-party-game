@@ -107,7 +107,8 @@ test("interventions are bounded per team, validated, and forbidden outside windo
   assert.equal(g.interfere(0, "wind", "left", NaN), null);
   assert.ok(g.interfere(0, "wind", "right", 0.3));
   assert.equal(g.interfere(0, "wind", "right", 1), null);
-  assert.ok(g.interfere(0, "hammer", "up", 1));
+  assert.equal(g.interfere(0, "hammer", "up", 1, { x: 99, z: 0 }), null);
+  assert.ok(g.interfere(0, "hammer", "up", 1, { x: 0, z: 0 }));
   assert.ok(g.interfere(1, "wind", "left", 1));
   g.settle();
   assert.equal(g.interfere(1, "hammer", "up", 0.5), null);
